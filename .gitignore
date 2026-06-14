@@ -1,0 +1,31 @@
+# SSH keys - never commit private keys
+infra/keys/id_rsa
+infra/keys/id_rsa.pub
+*.pem
+
+# Ansible
+ansible/*.retry
+ansible/.vault_pass
+*.retry
+
+# Logs
+logs/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Docker
+**/*.tar
