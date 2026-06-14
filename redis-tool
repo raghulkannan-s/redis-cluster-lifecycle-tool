@@ -1,0 +1,366 @@
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ANSIBLE_DIR="$SCRIPT_DIR/ansible"
+export ANSIBLE_CONFIG="$ANSIBLE_DIR/ansible.cfg"
+
+REDIS_CLI_KEY="$HOME/.ssh-redis-tool/id_rsa"
+NODE1_IP="10.10.0.11"
+REDIS_PORT="6379"
+
+# ---------------------------------------------------------------------------
+# Prerequisite check
+# ---------------------------------------------------------------------------
+check_prereqs() {
+    local missing=0
+
+    if command -v podman >/dev/null 2>&1; then
+        RUNTIME="podman"
+        VER=$(podman --version | awk '{print $3}')
+        echo "✓ Podman $VER found"
+    elif command -v docker >/dev/null 2>&1; then
+        RUNTIME="docker"
+        VER=$(docker --version | awk '{print $3}' | tr -d ',')
+        echo "✓ Docker $VER found"
+    else
+        echo "✗ Container runtime not found (Docker or Podman)"
+        echo "  Install Podman: https://podman.io/docs/installation"
+        echo "  Install Docker: https://docs.docker.com/engine/install/"
+        missing=1
+    fi
+
+    if command -v ansible-playbook >/dev/null 2>&1; then
+        AV=$(ansible-playbook --version | head -1 | grep -oP '\d+\.\d+\.\d+')
+        AMAJOR=$(echo "$AV" | cut -d. -f1)
+        AMINOR=$(echo "$AV" | cut -d. -f2)
+        if [ "$AMAJOR" -gt 2 ] || { [ "$AMAJOR" -eq 2 ] && [ "$AMINOR" -ge 14 ]; }; then
+            echo "✓ Ansible $AV found"
+        else
+            echo "✗ Ansible $AV found, but version 2.14+ required"
+            missing=1
+        fi
+    else
+        echo "✗ Ansible not found"
+        echo "  Install: pip install ansible (or use your OS package manager)"
+        missing=1
+    fi
+
+    if [ "$missing" -eq 1 ]; then
+        echo ""
+        echo "Please install the missing dependencies and retry."
+        exit 1
+    fi
+
+    echo "Proceeding..."
+    echo ""
+}
+
+# ---------------------------------------------------------------------------
+# Cluster topology printer
+# ---------------------------------------------------------------------------
+print_topology() {
+    echo ""
+    echo "===================================="
+    echo " Redis Cluster Topology"
+    echo "===================================="
+
+    local cluster_info
+    cluster_info=$(ssh -i "$REDIS_CLI_KEY" \
+        -o StrictHostKeyChecking=accept-new \
+        "root@${NODE1_IP}" \
+        "redis-cli -p ${REDIS_PORT} cluster info" 2>/dev/null)
+
+    local state
+    state=$(echo "$cluster_info" | awk -F: '/cluster_state/ {print $2}' | tr -d '\r')
+
+    echo "Cluster State: $state"
+    echo ""
+
+    local nodes
+    nodes=$(ssh -i "$REDIS_CLI_KEY" \
+        -o StrictHostKeyChecking=accept-new \
+        "root@${NODE1_IP}" \
+        "redis-cli -p ${REDIS_PORT} cluster nodes" 2>/dev/null)
+
+    echo "MASTERS"
+
+    while read -r line; do
+        ip_port=$(echo "$line" | awk '{print $2}' | cut -d@ -f1)
+
+        slots=$(echo "$line" | awk '
+            {
+                for(i=9;i<=NF;i++)
+                    printf "%s ", $i
+            }
+        ' | xargs)
+
+        ver=$(ssh -n -i "$REDIS_CLI_KEY" \
+            -o StrictHostKeyChecking=accept-new \
+            "root@$(echo "$ip_port" | cut -d: -f1)" \
+            "redis-cli -p ${REDIS_PORT} info server" 2>/dev/null |
+            awk -F: '/redis_version/ {print $2}' |
+            tr -d '\r')
+
+        echo "  $ip_port [master] v$ver slots: $slots"
+    done < <(echo "$nodes" | grep -E 'master')
+
+    echo ""
+    echo "REPLICAS"
+
+    while read -r line; do
+        ip_port=$(echo "$line" | awk '{print $2}' | cut -d@ -f1)
+
+        master_id=$(echo "$line" | awk '{print $4}')
+
+        master_ip=$(echo "$nodes" |
+            awk -v id="$master_id" '$1 == id {print $2}' |
+            cut -d@ -f1)
+
+        ver=$(ssh -n -i "$REDIS_CLI_KEY" \
+            -o StrictHostKeyChecking=accept-new \
+            "root@$(echo "$ip_port" | cut -d: -f1)" \
+            "redis-cli -p ${REDIS_PORT} info server" 2>/dev/null |
+            awk -F: '/redis_version/ {print $2}' |
+            tr -d '\r')
+
+        echo "  $ip_port [replica] v$ver replicating: $master_ip"
+    done < <(echo "$nodes" | grep -E 'slave')
+
+    echo ""
+}
+# ---------------------------------------------------------------------------
+# Phase 2 - Data seed
+# ---------------------------------------------------------------------------
+cmd_data_seed() {
+    local keys=1000
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --keys) keys="$2"; shift 2 ;;
+            *) echo "Unknown option: $1"; exit 1 ;;
+        esac
+    done
+
+    echo "Seeding $keys keys into the cluster..."
+    echo ""
+
+    local inserted=0
+    local failed=0
+
+    for ((i=1; i<=keys; i++)); do
+        local key
+        key=$(printf "key:%04d" "$i")
+
+        local value
+        value=$(echo -n "$key" | sha256sum | awk '{print $1}')
+
+        if ssh -n -i "$REDIS_CLI_KEY" -o StrictHostKeyChecking=accept-new \
+            "root@${NODE1_IP}" "redis-cli -c -p ${REDIS_PORT} SET $key $value" 2>/dev/null \
+            | grep -q "OK"; then
+            inserted=$((inserted+1))
+        else
+            failed=$((failed+1))
+        fi
+    done
+
+    echo "Insertion complete."
+    echo "  Total keys requested: $keys"
+    echo "  Successfully inserted: $inserted"
+    echo "  Failed: $failed"
+    echo ""
+
+    echo "Distribution across masters:"
+    for ip in 10.10.0.11 10.10.0.12 10.10.0.13; do
+        local count
+        count=$(ssh -n -i "$REDIS_CLI_KEY" -o StrictHostKeyChecking=accept-new \
+            "root@${ip}" "redis-cli -p ${REDIS_PORT} DBSIZE" 2>/dev/null | tr -d '\r')
+        echo "  ${ip}:${REDIS_PORT} -> $count keys"
+    done
+    echo ""
+}
+
+# ---------------------------------------------------------------------------
+# Phase 2 - Data verify
+# ---------------------------------------------------------------------------
+cmd_data_verify() {
+    local keys=1000
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --keys) keys="$2"; shift 2 ;;
+            *) echo "Unknown option: $1"; exit 1 ;;
+        esac
+    done
+
+    echo "Verifying $keys keys..."
+    echo ""
+
+    local missing=0
+    local mismatched=0
+    local ok=0
+
+    for ((i=1; i<=keys; i++)); do
+        local key
+        key=$(printf "key:%04d" "$i")
+
+        local expected
+        expected=$(echo -n "$key" | sha256sum | awk '{print $1}')
+
+        local actual
+        actual=$(ssh -n -i "$REDIS_CLI_KEY" -o StrictHostKeyChecking=accept-new \
+            "root@${NODE1_IP}" "redis-cli -c -p ${REDIS_PORT} GET $key" 2>/dev/null | tr -d '\r')
+
+        if [ -z "$actual" ]; then
+            missing=$((missing+1))
+        elif [ "$actual" != "$expected" ]; then
+            mismatched=$((mismatched+1))
+        else
+            ok=$((ok+1))
+        fi
+    done
+
+    echo ""
+    if [ "$missing" -eq 0 ] && [ "$mismatched" -eq 0 ]; then
+        echo "PASS — $ok/$keys keys verified"
+    else
+        echo "FAIL — $missing keys missing, $mismatched values mismatched"
+    fi
+    echo ""
+}
+
+# ---------------------------------------------------------------------------
+# Phase 3 - Cluster status
+# ---------------------------------------------------------------------------
+cmd_status() {
+    local cluster_info
+    cluster_info=$(ssh -n -i "$REDIS_CLI_KEY" -o StrictHostKeyChecking=accept-new \
+        "root@${NODE1_IP}" "redis-cli -p ${REDIS_PORT} cluster info" 2>/dev/null)
+
+    local state
+    state=$(echo "$cluster_info" | awk -F: '/cluster_state/ {print $2}' | tr -d '\r')
+
+    echo "Cluster State: $state"
+    echo ""
+
+    local nodes
+    nodes=$(ssh -n -i "$REDIS_CLI_KEY" -o StrictHostKeyChecking=accept-new \
+        "root@${NODE1_IP}" "redis-cli -p ${REDIS_PORT} cluster nodes" 2>/dev/null)
+
+    echo "MASTERS"
+    while read -r line; do
+        ip_port=$(echo "$line" | awk '{print $2}' | cut -d@ -f1)
+        ip=$(echo "$ip_port" | cut -d: -f1)
+
+        slots=$(echo "$line" | awk '{ for(i=9;i<=NF;i++) printf "%s ", $i }' | xargs)
+
+        ver=$(ssh -n -i "$REDIS_CLI_KEY" -o StrictHostKeyChecking=accept-new \
+            "root@${ip}" "redis-cli -p ${REDIS_PORT} info server" 2>/dev/null \
+            | awk -F: '/redis_version/ {print $2}' | tr -d '\r')
+
+        keycount=$(ssh -n -i "$REDIS_CLI_KEY" -o StrictHostKeyChecking=accept-new \
+            "root@${ip}" "redis-cli -p ${REDIS_PORT} DBSIZE" 2>/dev/null | tr -d '\r')
+
+        mem=$(ssh -n -i "$REDIS_CLI_KEY" -o StrictHostKeyChecking=accept-new \
+            "root@${ip}" "redis-cli -p ${REDIS_PORT} info memory" 2>/dev/null \
+            | awk -F: '/used_memory_human/ {print $2}' | tr -d '\r')
+
+        echo "  $ip_port [master] v$ver slots: $slots keys: $keycount mem: $mem"
+    done < <(echo "$nodes" | grep -E 'master')
+
+    echo ""
+    echo "REPLICAS"
+    while read -r line; do
+        ip_port=$(echo "$line" | awk '{print $2}' | cut -d@ -f1)
+        ip=$(echo "$ip_port" | cut -d: -f1)
+        master_id=$(echo "$line" | awk '{print $4}')
+
+        master_ip=$(echo "$nodes" | awk -v id="$master_id" '$1 == id {print $2}' | cut -d@ -f1)
+
+        ver=$(ssh -n -i "$REDIS_CLI_KEY" -o StrictHostKeyChecking=accept-new \
+            "root@${ip}" "redis-cli -p ${REDIS_PORT} info server" 2>/dev/null \
+            | awk -F: '/redis_version/ {print $2}' | tr -d '\r')
+
+        mem=$(ssh -n -i "$REDIS_CLI_KEY" -o StrictHostKeyChecking=accept-new \
+            "root@${ip}" "redis-cli -p ${REDIS_PORT} info memory" 2>/dev/null \
+            | awk -F: '/used_memory_human/ {print $2}' | tr -d '\r')
+
+        echo "  $ip_port [replica] v$ver replicating: $master_ip mem: $mem"
+    done < <(echo "$nodes" | grep -E 'slave')
+
+    echo ""
+}
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+cmd_provision() {
+    local version="7.0.15"
+    local masters=3
+    local replicas_per_master=1
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --version) version="$2"; shift 2 ;;
+            --masters) masters="$2"; shift 2 ;;
+            --replicas-per-master) replicas_per_master="$2"; shift 2 ;;
+            *) echo "Unknown option: $1"; exit 1 ;;
+        esac
+    done
+
+    if [ "$masters" -ne 3 ] || [ "$replicas_per_master" -ne 1 ]; then
+        echo "NOTE: This tool is built for a fixed 6-node topology"
+        echo "      (3 masters + 3 replicas, replicas-per-master=1)."
+        echo "      Ignoring --masters/--replicas-per-master overrides."
+        echo ""
+    fi
+
+    echo "Provisioning Redis $version on 6-node cluster..."
+    echo ""
+
+    # Idempotency check: if cluster is already healthy, skip re-provisioning
+    local existing_state
+    existing_state=$(ssh -i "$REDIS_CLI_KEY" -o StrictHostKeyChecking=accept-new \
+        "root@${NODE1_IP}" "redis-cli -p ${REDIS_PORT} cluster info 2>/dev/null" 2>/dev/null \
+        | awk -F: '/cluster_state/ {print $2}' | tr -d '\r')
+
+    if [ "$existing_state" = "ok" ]; then
+        echo "Cluster already provisioned and healthy (cluster_state:ok)."
+        echo "Skipping re-provisioning. Showing current topology:"
+        print_topology
+        return 0
+    fi
+
+    ansible-playbook "$ANSIBLE_DIR/playbooks/provision.yml" -e "redis_version=$version"
+
+    print_topology
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+check_prereqs
+
+CMD="${1:-}"
+shift || true
+
+case "$CMD" in
+    provision)
+        cmd_provision "$@"
+        ;;
+    data)
+        SUBCMD="${1:-}"
+        shift || true
+        case "$SUBCMD" in
+            seed)   cmd_data_seed "$@" ;;
+            verify) cmd_data_verify "$@" ;;
+            *) echo "Usage: $0 data {seed|verify} [options]"; exit 1 ;;
+        esac
+        ;;
+    status)
+        cmd_status "$@"
+        ;;
+    *)
+        echo "Usage: $0 {provision|data seed|data verify|status} [options]"
+        exit 1
+        ;;
+esac

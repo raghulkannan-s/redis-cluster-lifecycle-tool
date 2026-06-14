@@ -1,0 +1,118 @@
+---
+- name: Create required directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ redis_config_dir }}"
+    - "{{ redis_data_dir }}"
+    - "{{ redis_log_dir }}"
+    - "/var/run/redis"
+    - "/usr/local/src"
+
+- name: Check if redis-server for this version is already built
+  stat:
+    path: "{{ redis_bin_dir }}/redis-server"
+  register: redis_binary
+
+- name: Install build dependencies
+  apt:
+    name:
+      - build-essential
+      - tcl
+      - wget
+      - pkg-config
+      - libssl-dev
+    state: present
+    update_cache: yes
+  when: not redis_binary.stat.exists
+  register: apt_install
+  retries: 3
+  delay: 5
+  until: apt_install is succeeded
+
+- name: Download Redis {{ redis_version }} source
+  get_url:
+    url: "{{ redis_download_url }}"
+    dest: "/usr/local/src/redis-{{ redis_version }}.tar.gz"
+    timeout: 120
+  when: not redis_binary.stat.exists
+
+- name: Extract Redis source
+  unarchive:
+    src: "/usr/local/src/redis-{{ redis_version }}.tar.gz"
+    dest: "/usr/local/src"
+    remote_src: yes
+    creates: "{{ redis_src_dir }}/src/redis-server"
+  when: not redis_binary.stat.exists
+
+- name: Build Redis (make)
+  command: make -j{{ ansible_processor_vcpus | default(2) }}
+  args:
+    chdir: "{{ redis_src_dir }}"
+    creates: "{{ redis_src_dir }}/src/redis-server"
+  when: not redis_binary.stat.exists
+
+- name: Install Redis binaries to versioned directory
+  command: make PREFIX={{ redis_install_dir }} install
+  args:
+    chdir: "{{ redis_src_dir }}"
+    creates: "{{ redis_bin_dir }}/redis-server"
+  when: not redis_binary.stat.exists
+
+- name: Symlink redis binaries into /usr/local/bin
+  file:
+    src: "{{ redis_bin_dir }}/{{ item }}"
+    dest: "{{ redis_symlink_dir }}/{{ item }}"
+    state: link
+    force: yes
+  loop:
+    - redis-server
+    - redis-cli
+    - redis-benchmark
+    - redis-check-aof
+    - redis-check-rdb
+
+- name: Deploy redis.conf
+  template:
+    src: redis.conf.j2
+    dest: "{{ redis_config_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart redis
+
+- name: Set ownership on data/log directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    recurse: yes
+  loop:
+    - "{{ redis_data_dir }}"
+    - "{{ redis_log_dir }}"
+
+- name: Flush handlers to apply config changes before checking status
+  meta: flush_handlers
+
+- name: Check if Redis is already running
+  command: "{{ redis_symlink_dir }}/redis-cli -p {{ redis_port }} ping"
+  register: redis_running
+  ignore_errors: true
+  changed_when: false
+
+- name: Start Redis server (daemonized)
+  command: "{{ redis_symlink_dir }}/redis-server {{ redis_config_file }}"
+  when: redis_running.stdout is not defined or redis_running.stdout != "PONG"
+
+- name: Wait for Redis to respond to PING
+  command: "{{ redis_symlink_dir }}/redis-cli -p {{ redis_port }} ping"
+  register: redis_ping
+  until: redis_ping.stdout == "PONG"
+  retries: 10
+  delay: 2
+  changed_when: false

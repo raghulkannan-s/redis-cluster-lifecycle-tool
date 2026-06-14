@@ -11,6 +11,7 @@ ansible/.vault_pass
 # Logs
 logs/
 *.log
+output/
 
 # Python
 __pycache__/
@@ -29,3 +30,5 @@ Thumbs.db
 
 # Docker
 **/*.tar
+
+
