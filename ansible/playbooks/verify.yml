@@ -1,0 +1,21 @@
+---
+- name: Verify Redis Cluster
+  hosts: redis_cluster
+  gather_facts: false
+
+  tasks:
+
+    - name: Get Redis version
+      command: redis-cli info server
+      register: version_info
+      changed_when: false
+
+    - name: Get replication info
+      command: redis-cli info replication
+      register: replication_info
+      changed_when: false
+
+    - name: Get cluster info
+      command: redis-cli cluster info
+      register: cluster_info
+      changed_when: false

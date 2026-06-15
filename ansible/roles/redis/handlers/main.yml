@@ -8,7 +8,7 @@
         exit 0
       fi
     fi
-    {{ redis_symlink_dir }}/redis-cli -p {{ redis_port }} shutdown nosave || true
+    {{ redis_symlink_dir }}/redis-cli -p {{ redis_port }} shutdown || true
     sleep 1
     rm -f {{ redis_pid_file }}
     {{ redis_symlink_dir }}/redis-server {{ redis_config_file }}

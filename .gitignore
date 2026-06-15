@@ -31,4 +31,5 @@ Thumbs.db
 # Docker
 **/*.tar
 
+infra/keys/
 

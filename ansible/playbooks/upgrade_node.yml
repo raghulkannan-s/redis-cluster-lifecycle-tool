@@ -1,0 +1,159 @@
+---
+# ansible/playbooks/upgrade_node.yml
+#
+# Upgrades Redis on a SINGLE targeted node to a new version.
+# Does NOT touch cluster membership - the calling redis-tool script handles
+# failover/replica promotion before invoking this, and cluster rejoin after.
+#
+# Usage:
+#   ansible-playbook playbooks/upgrade_node.yml \
+#     -e "redis_version=7.2.6" --limit redis-node-4
+#
+# Steps:
+#   1. Stop Redis on the target node (graceful shutdown, keep nodes.conf/data)
+#   2. Build/install the new Redis version (role tasks are idempotent and
+#      version-pathed, so this builds 7.2.6 alongside the existing 7.0.15)
+#   3. Re-point symlinks to the new version's binaries
+#   4. Start Redis again with the SAME config (cluster-config-file preserved,
+#      so the node rejoins the cluster with its existing node ID and role)
+
+- name: Upgrade Redis on a single node
+  hosts: all
+  become: true
+  gather_facts: true
+  vars:
+    redis_cli_bin: "/usr/local/bin/redis-cli"
+    redis_server_bin: "/usr/local/bin/redis-server"
+
+  vars_files:
+    - ../roles/redis/defaults/main.yml
+
+  tasks:
+
+    - name: Record current Redis version before upgrade
+      command: "{{ redis_cli_bin }} -p {{ redis_port }} info server"
+      register: pre_upgrade_info
+      changed_when: false
+      failed_when: false
+
+    - name: Show current version
+      debug:
+        msg: "Current version info captured"
+
+    - name: Stop Redis (graceful shutdown, preserve data + cluster state)
+      command: "{{ redis_cli_bin }} -p {{ redis_port }} shutdown save"
+      ignore_errors: true
+
+    - name: Wait for Redis process to exit
+      wait_for:
+        path: "{{ redis_pid_file }}"
+        state: absent
+        timeout: 30
+      ignore_errors: true
+
+    - name: Remove stale pid file if present
+      file:
+        path: "{{ redis_pid_file }}"
+        state: absent
+
+    # --- Build/install target version (role-style, but inline so this
+    #     playbook can run standalone against --limit one host) ----------
+
+    - name: Check if target redis-server version is already built
+      stat:
+        path: "{{ redis_bin_dir }}/redis-server"
+      register: target_binary
+
+    - name: Install build dependencies
+      apt:
+        name:
+          - build-essential
+          - tcl
+          - wget
+          - pkg-config
+          - libssl-dev
+        state: present
+        update_cache: true
+      when: not target_binary.stat.exists
+      register: apt_install
+      retries: 3
+      delay: 5
+      until: apt_install is succeeded
+
+    - name: Download Redis {{ redis_version }} source
+      get_url:
+        url: "{{ redis_download_url }}"
+        dest: "/usr/local/src/redis-{{ redis_version }}.tar.gz"
+        timeout: 120
+      when: not target_binary.stat.exists
+
+    - name: Extract Redis source
+      unarchive:
+        src: "/usr/local/src/redis-{{ redis_version }}.tar.gz"
+        dest: "/usr/local/src"
+        remote_src: true
+        creates: "{{ redis_src_dir }}/src/redis-server"
+      when: not target_binary.stat.exists
+
+    - name: Build Redis (make)
+      command: make -j{{ ansible_processor_vcpus | default(2) }}
+      args:
+        chdir: "{{ redis_src_dir }}"
+        creates: "{{ redis_src_dir }}/src/redis-server"
+      when: not target_binary.stat.exists
+
+    - name: Install Redis binaries to versioned directory
+      command: make PREFIX={{ redis_install_dir }} install
+      args:
+        chdir: "{{ redis_src_dir }}"
+        creates: "{{ redis_bin_dir }}/redis-server"
+      when: not target_binary.stat.exists
+
+    - name: Re-point symlinks to the new version's binaries
+      file:
+        src: "{{ redis_bin_dir }}/{{ item }}"
+        dest: "{{ redis_symlink_dir }}/{{ item }}"
+        state: link
+        force: true
+      loop:
+        - redis-server
+        - redis-cli
+        - redis-benchmark
+        - redis-check-aof
+        - redis-check-rdb
+
+    - name: Update redis.conf with new version (in case template changed)
+      template:
+        src: ../roles/redis/templates/redis.conf.j2
+        dest: "{{ redis_config_file }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Start Redis with the existing config (rejoins cluster via nodes.conf)
+      command: "{{ redis_symlink_dir }}/redis-server {{ redis_config_file }}"
+
+    - name: Wait for Redis to respond to PING
+      command: "{{ redis_symlink_dir }}/redis-cli -p {{ redis_port }} ping"
+      register: redis_ping
+      until: redis_ping.stdout == "PONG"
+      retries: 15
+      delay: 2
+      changed_when: false
+
+    - name: Wait for node to rejoin cluster (cluster_state ok)
+      command: "{{ redis_symlink_dir }}/redis-cli -p {{ redis_port }} cluster info"
+      register: rejoin_check
+      until: "'cluster_state:ok' in rejoin_check.stdout"
+      retries: 20
+      delay: 3
+      changed_when: false
+
+    - name: Confirm new version
+      command: "{{ redis_symlink_dir }}/redis-cli -p {{ redis_port }} info server"
+      register: post_upgrade_info
+      changed_when: false
+
+    - name: Show new version
+      debug:
+        msg: "{{ post_upgrade_info.stdout_lines | select('match', '^redis_version:.*') | list }}"
