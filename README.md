@@ -116,14 +116,13 @@ Checks:
 * One replica per master
 * Static container IP addresses
 * SSH key authentication
-
+* 
 ## Known Limitations
 
-* No rollback support
 * No scale-out support
 * No scale-in support
-* No structured logging
-
+* Rollback support is experimental and not fully validated across Redis versions
+  
 ## Output Files
 
 Generate submission artifacts:
@@ -137,3 +136,10 @@ mkdir -p output
 ./redis-tool upgrade --target-version 7.2.6 --strategy rolling > output/upgrade_output.txt
 ./redis-tool verify --full > output/verify_output.txt
 ```
+
+Additional Features
+
+- Idempotent provisioning
+- Idempotent upgrades
+- Structured operation logging
+- Full cluster verification

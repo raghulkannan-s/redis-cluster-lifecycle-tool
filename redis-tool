@@ -1,4 +1,7 @@
 #!/bin/bash
+
+REDIS_PORT="6379"
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -8,6 +11,24 @@ export ANSIBLE_CONFIG="$ANSIBLE_DIR/ansible.cfg"
 REDIS_CLI_KEY="$HOME/.ssh-redis-tool/id_rsa"
 NODE1_IP="10.10.0.11"
 REDIS_PORT="6379"
+
+# ---------------------------------------------------------------------------
+# Structured Logging
+# ---------------------------------------------------------------------------
+LOG_DIR="$SCRIPT_DIR/logs"
+LOG_FILE="$LOG_DIR/operations.log"
+
+log() {
+    mkdir -p "$LOG_DIR"
+
+    local level="$1"
+    shift
+
+    printf '[%s] [%s] %s\n' \
+        "$(date '+%Y-%m-%d %H:%M:%S')" \
+        "$level" \
+        "$*" >> "$LOG_FILE"
+}
 
 # ---------------------------------------------------------------------------
 # Prerequisite check
@@ -143,6 +164,7 @@ cmd_data_seed() {
     done
 
     echo "Seeding $keys keys into the cluster..."
+    log INFO "Data seed started keys=$keys"
     echo ""
 
     local inserted=0
@@ -178,13 +200,16 @@ cmd_data_seed() {
         echo "  ${ip}:${REDIS_PORT} -> $count keys"
     done
     echo ""
+    log INFO "Data seed completed inserted=$inserted failed=$failed"
 }
-
+    
 # ---------------------------------------------------------------------------
 # Phase 2 - Data verify
 # ---------------------------------------------------------------------------
 cmd_data_verify() {
     local keys=1000
+
+    log INFO "Data verification started keys=$keys"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -223,8 +248,12 @@ cmd_data_verify() {
     echo ""
     if [ "$missing" -eq 0 ] && [ "$mismatched" -eq 0 ]; then
         echo "PASS — $ok/$keys keys verified"
+        log INFO "Data verification passed"
+        return 0
     else
         echo "FAIL — $missing keys missing, $mismatched values mismatched"
+        log ERROR "Data verification failed missing=$missing mismatched=$mismatched"
+        return 1
     fi
     echo ""
 }
@@ -378,6 +407,8 @@ cmd_upgrade() {
     local target_version=""
     local strategy="rolling"
 
+    log INFO "Upgrade started target_version=$target_version"
+
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --target-version) target_version="$2"; shift 2 ;;
@@ -529,6 +560,7 @@ cmd_upgrade() {
 
     echo ""
     echo "UPGRADE COMPLETE — all nodes on v${target_version}, data integrity verified"
+    log INFO "Upgrade completed target_version=$target_version"
 }
 
 # ---------------------------------------------------------------------------
@@ -556,6 +588,7 @@ cmd_provision() {
     fi
 
     echo "Provisioning Redis $version on 6-node cluster..."
+    log INFO "Provision started version=$version"
     echo ""
 
     # Idempotency check: if cluster is already healthy, skip re-provisioning
@@ -568,10 +601,12 @@ cmd_provision() {
         echo "Cluster already provisioned and healthy (cluster_state:ok)."
         echo "Skipping re-provisioning. Showing current topology:"
         print_topology
+        log INFO "Provision skipped - cluster already healthy"
         return 0
     fi
 
     ansible-playbook "$ANSIBLE_DIR/playbooks/provision.yml" -e "redis_version=$version"
+    log INFO "Provision completed successfully"
 
     print_topology
 }
@@ -580,7 +615,7 @@ cmd_provision() {
 # Phase 5 - Full verification
 # ---------------------------------------------------------------------------
 cmd_verify_full() {
-
+    log INFO "Full verification started"
     echo "===================================="
     echo " FULL CLUSTER VERIFICATION"
     echo "===================================="
@@ -594,7 +629,7 @@ cmd_verify_full() {
     echo "[1/5] Data Integrity"
 
     local verify_output
-    verify_output=$(cmd_data_verify --keys 10)
+    verify_output=$(cmd_data_verify --keys 1000)
 
     if echo "$verify_output" | grep -q "PASS"; then
         echo "  PASS"
@@ -755,12 +790,62 @@ cmd_verify_full() {
     if [ "$overall_fail" -eq 0 ]; then
         echo " OVERALL RESULT: PASS"
         echo "===================================="
+        log INFO "Full verification passed"
         return 0
     else
         echo " OVERALL RESULT: FAIL"
         echo "===================================="
+        log ERROR "Full verification failed"
         return 1
     fi
+}
+cmd_rollback() {
+
+    local target_version=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --target-version)
+                target_version="$2"
+                shift 2
+                ;;
+            *)
+                echo "Unknown option: $1"
+                exit 1
+                ;;
+        esac
+    done
+
+    if [ -z "$target_version" ]; then
+        echo "Usage: $0 rollback --target-version <version>"
+        exit 1
+    fi
+
+    echo ""
+    echo "===================================="
+    echo "ROLLBACK STARTED"
+    echo "===================================="
+    echo ""
+
+    log INFO "Rollback started (target_version=$target_version)"
+
+    cmd_upgrade \
+        --target-version "$target_version" \
+        --strategy rolling
+
+    rc=$?
+
+    if [ "$rc" -eq 0 ]; then
+        echo ""
+        echo "ROLLBACK COMPLETE"
+        log INFO "Rollback completed"
+    else
+        echo ""
+        echo "ROLLBACK FAILED"
+        log ERROR "Rollback failed"
+    fi
+
+    return "$rc"
 }
 
 # ---------------------------------------------------------------------------
@@ -772,26 +857,42 @@ CMD="${1:-}"
 shift || true
 
 case "$CMD" in
+
     provision)
         cmd_provision "$@"
         ;;
+
     data)
         SUBCMD="${1:-}"
         shift || true
+
         case "$SUBCMD" in
-            seed)   cmd_data_seed "$@" ;;
-            verify) cmd_data_verify "$@" ;;
-            *) echo "Usage: $0 data {seed|verify} [options]"; exit 1 ;;
+            seed)
+                cmd_data_seed "$@"
+                ;;
+            verify)
+                cmd_data_verify "$@"
+                ;;
+            *)
+                echo "Usage: $0 data {seed|verify} [options]"
+                exit 1
+                ;;
         esac
         ;;
+
     status)
         cmd_status "$@"
         ;;
-       upgrade)
+
+    upgrade)
         cmd_upgrade "$@"
         ;;
 
-        verify)
+    rollback)
+        cmd_rollback "$@"
+        ;;
+
+    verify)
         SUBCMD="${1:-}"
 
         if [ "$SUBCMD" = "--full" ] || [ -z "$SUBCMD" ]; then
@@ -804,7 +905,7 @@ case "$CMD" in
         ;;
 
     *)
-        echo "Usage: $0 {provision|data seed|data verify|status|upgrade|verify --full} [options]"
+        echo "Usage: $0 {provision|data seed|data verify|status|upgrade|rollback|verify --full}"
         exit 1
         ;;
 esac
