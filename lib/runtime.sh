@@ -1,12 +1,12 @@
 
 detect_runtime() {
-    if command -v docker >/dev/null 2>&1; then
-        RUNTIME="docker"
+    if command -v podman >/dev/null 2>&1; then
+        RUNTIME="podman"
         return 0
     fi
 
-    if command -v podman >/dev/null 2>&1; then
-        RUNTIME="podman"
+    if command -v docker >/dev/null 2>&1; then
+        RUNTIME="docker"
         return 0
     fi
 
@@ -27,8 +27,8 @@ check_runtime_prereqs() {
         fi
     else
         echo "✗ Container runtime not found (Docker or Podman)"
-        echo "Install Docker: https://docs.docker.com/engine/install/"
         echo "Install Podman: https://podman.io/docs/installation"
+        echo "Install Docker: https://docs.docker.com/engine/install/"
         missing=1
     fi
 
@@ -55,8 +55,8 @@ check_prereqs() {
         fi
     else
         echo "✗ Container runtime not found (Docker or Podman)"
-        echo "Install Docker: https://docs.docker.com/engine/install/"
         echo "Install Podman: https://podman.io/docs/installation"
+        echo "Install Docker: https://docs.docker.com/engine/install/"
         missing=1
     fi
 

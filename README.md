@@ -7,14 +7,90 @@ A command-line automation tool (`redis-tool`) that completely automates the life
 - **Automated Provisioning**: Deploy and configure a fully operational Redis cluster (3 masters, 3 replicas) using Ansible playbooks.
 - **Zero-Downtime Upgrades**: Execute rolling upgrades across the cluster dynamically (replicas first, then master failovers) without losing availability or data integrity.
 - **Data Integrity Validation**: Built-in seeded data generation and verification to mathematically prove zero data loss.
-- **Structured Logging**: Automatic operation logging to `logs/operations.log`.
+- **Idempotency (Stretch Goal S4)**: The script safely ignores already-provisioned clusters or seamlessly updates configurations without restarting active nodes, preventing data loss.
+- **Structured Logging (Stretch Goal S5)**: Every operation is intercepted and saved as pure JSON lines in `logs/operations.log`.
+
+---
+
+## Architecture Flow
+
+```mermaid
+graph TD
+    A[redis-tool CLI] -->|setup| B(Container Infrastructure)
+    A -->|provision| C(Ansible Control Node)
+    C -->|ssh| D[redis-node-1 to 6]
+    A -->|data seed/verify| E(Redis Cluster)
+    A -->|upgrade| F{Rolling Upgrade Logic}
+    F -->|1. upgrade replicas| G(Sync with Master)
+    F -->|2. cluster failover| H(Promote Replica)
+    F -->|3. upgrade master| I(Demoted to Replica)
+```
+
+---
+
+## Prerequisites
+
+Before running the tool, ensure the host machine has the following dependencies installed:
+
+1. **Container Runtime**: [Podman](https://podman.io/docs/installation) (Preferred, fully open-source) or [Docker Engine](https://docs.docker.com/engine/install/).
+2. **Ansible**: Version `2.14` or higher (`pip install ansible` or via system package manager).
+3. **Container Compose**: `podman-compose` or `docker-compose`.
+
+---
+
+## Installation
+
+1. Clone the repository to your local control machine:
+```bash
+git clone https://github.com/raghulkannan-s/redis-cluster-lifecycle-tool.git
+cd redis-cluster-lifecycle-tool
+```
+
+2. Make the CLI entrypoint executable:
+```bash
+chmod +x redis-tool
+```
+
+---
+
+## Quick Start (Copy & Paste)
+
+If you want to run the entire pipeline end-to-end to verify functionality instantly, just copy and paste this block. It will clone the repo, spin up the infrastructure, provision the cluster, seed the data, execute a zero-downtime rolling upgrade, verify mathematical data integrity, and save all grading output files automatically:
+
+```bash
+git clone https://github.com/raghulkannan-s/redis-cluster-lifecycle-tool.git
+cd redis-cluster-lifecycle-tool
+chmod +x redis-tool run_all.sh
+./run_all.sh
+```
+
+---
+
+## Project Structure
+
+```text
+redis-cluster-lifecycle-tool/
+├── redis-tool                 # Main CLI entrypoint
+├── lib/                       # Bash library (setup, provision, upgrade, rollback)
+├── ansible/
+│   ├── ansible.cfg
+│   ├── inventory/hosts.ini    # Static IPs for the 6 nodes
+│   ├── playbooks/             # Provision, upgrade, and rollback playbooks
+│   └── roles/redis/           # Main Redis role (tasks, handlers, templates)
+├── infra/
+│   ├── Dockerfile             # Ubuntu 22.04 base image with SSH
+│   └── compose.yml            # Container infrastructure definition
+├── logs/
+│   └── operations.log         # Structured JSON logging (S5)
+└── output/                    # Terminal captures for grading
+```
 
 ---
 
 ## Getting Started
 
 ### 1. Bring Up the Infrastructure
-You must start the container infrastructure first before running any Ansible operations. The tool automatically detects whether you have **Docker** or **Podman** installed. (It prefers Docker by default if both are present).
+You must start the container infrastructure first before running any Ansible operations. The tool automatically detects whether you have **Docker** or **Podman** installed. (It strictly prefers Podman by default if both are present, as it is fully open-source).
 
 ```bash
 ./redis-tool setup
