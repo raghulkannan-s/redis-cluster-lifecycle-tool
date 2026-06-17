@@ -19,6 +19,25 @@ source "$SCRIPT_DIR/lib/verify.sh"
 source "$SCRIPT_DIR/lib/rollback.sh"
 
 CMD="${1:-}"
+SUBCMD="${2:-}"
+
+LOG_FILE=""
+if [ "$CMD" = "data" ]; then
+    if [ "$SUBCMD" = "seed" ] || [ "$SUBCMD" = "verify" ]; then
+        LOG_FILE="data_${SUBCMD}_output.txt"
+    else
+        LOG_FILE="data_output.txt"
+    fi
+elif [[ "setup provision status upgrade rollback verify" == *"$CMD"* ]]; then
+    LOG_FILE="${CMD}_output.txt"
+fi
+
+if [ -n "$LOG_FILE" ]; then
+    mkdir -p "$SCRIPT_DIR/output"
+    # Redirect all stdout/stderr to tee to save logs automatically
+    exec > >(tee "$SCRIPT_DIR/output/$LOG_FILE") 2>&1
+fi
+
 shift || true
 
 case "$CMD" in

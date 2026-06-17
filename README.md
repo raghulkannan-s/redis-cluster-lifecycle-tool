@@ -32,9 +32,9 @@ graph TD
 
 Before running the tool, ensure the host machine has the following dependencies installed:
 
-1. **Container Runtime**: [Podman](https://podman.io/docs/installation) (Preferred, fully open-source) or [Docker Engine](https://docs.docker.com/engine/install/).
+1. **Container Runtime**: [Docker Engine](https://docs.docker.com/engine/install/) (Preferred) or [Podman](https://podman.io/docs/installation).
 2. **Ansible**: Version `2.14` or higher (`pip install ansible` or via system package manager).
-3. **Container Compose**: `podman-compose` or `docker-compose`.
+3. **Container Compose**: `docker-compose` or `podman-compose`.
 
 ---
 
@@ -90,7 +90,7 @@ redis-cluster-lifecycle-tool/
 ## Getting Started
 
 ### 1. Bring Up the Infrastructure
-You must start the container infrastructure first before running any Ansible operations. The tool automatically detects whether you have **Docker** or **Podman** installed. (It strictly prefers Podman by default if both are present, as it is fully open-source).
+You must start the container infrastructure first before running any Ansible operations. The tool automatically detects whether you have **Docker** or **Podman** installed. (It strictly prefers Docker by default if both are present).
 
 ```bash
 ./redis-tool setup

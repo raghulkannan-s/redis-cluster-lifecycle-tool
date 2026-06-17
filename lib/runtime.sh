@@ -1,12 +1,12 @@
 
 detect_runtime() {
-    if command -v podman >/dev/null 2>&1; then
-        RUNTIME="podman"
+    if command -v docker >/dev/null 2>&1; then
+        RUNTIME="docker"
         return 0
     fi
 
-    if command -v docker >/dev/null 2>&1; then
-        RUNTIME="docker"
+    if command -v podman >/dev/null 2>&1; then
+        RUNTIME="podman"
         return 0
     fi
 
@@ -27,8 +27,8 @@ check_runtime_prereqs() {
         fi
     else
         echo "✗ Container runtime not found (Docker or Podman)"
-        echo "Install Podman: https://podman.io/docs/installation"
         echo "Install Docker: https://docs.docker.com/engine/install/"
+        echo "Install Podman: https://podman.io/docs/installation"
         missing=1
     fi
 
@@ -55,8 +55,8 @@ check_prereqs() {
         fi
     else
         echo "✗ Container runtime not found (Docker or Podman)"
-        echo "Install Podman: https://podman.io/docs/installation"
         echo "Install Docker: https://docs.docker.com/engine/install/"
+        echo "Install Podman: https://podman.io/docs/installation"
         missing=1
     fi
 
@@ -122,7 +122,7 @@ select_runtime() {
 }
 
 count_running_nodes() {
-    local runtime="${1:-${RUNTIME:-podman}}"
+    local runtime="${1:-${RUNTIME:-docker}}"
     local running=0
 
     for node in \
@@ -181,10 +181,25 @@ start_infra() {
 
         echo "Starting infrastructure..."
 
+        # Pre-create the network so we can patch the CNI config version before containers start
+        podman network create infra_redis-net --subnet 10.10.0.0/24 >/dev/null 2>&1 || true
+        # Patch the CNI config to avoid firewall plugin version incompatibility
+        for cni_conf in ~/.config/cni/net.d/*infra_redis-net.conflist /etc/cni/net.d/*infra_redis-net.conflist; do
+            if [ -f "$cni_conf" ]; then
+                sed -i 's/"cniVersion": "1.0.0"/"cniVersion": "0.4.0"/g' "$cni_conf"
+            fi
+        done
+
         if ! podman-compose up -d --build; then
             echo "Retrying after cleanup..."
             podman-compose down >/dev/null 2>&1 || true
             podman network prune -f >/dev/null 2>&1 || true
+            podman network create infra_redis-net --subnet 10.10.0.0/24 >/dev/null 2>&1 || true
+            for cni_conf in ~/.config/cni/net.d/*infra_redis-net.conflist /etc/cni/net.d/*infra_redis-net.conflist; do
+                if [ -f "$cni_conf" ]; then
+                    sed -i 's/"cniVersion": "1.0.0"/"cniVersion": "0.4.0"/g' "$cni_conf"
+                fi
+            done
             podman-compose up -d --build
         fi
 

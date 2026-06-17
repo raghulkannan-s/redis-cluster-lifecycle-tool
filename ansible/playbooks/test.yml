@@ -1,0 +1,10 @@
+---
+- hosts: all
+  gather_facts: false
+  tasks:
+    - name: Get IP addresses
+      command: ip a
+      register: ip_output
+    - name: Show IP addresses
+      debug:
+        msg: "{{ ip_output.stdout }}"
