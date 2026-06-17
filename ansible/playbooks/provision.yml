@@ -43,6 +43,15 @@
         var: cluster_create.stdout_lines
       when: cluster_create is defined and cluster_create is changed
 
+    - name: Wait for cluster to converge (cluster_state:ok)
+      command: "{{ redis_cli }} -p {{ redis_port }} cluster info"
+      register: cluster_converge
+      until: "'cluster_state:ok' in cluster_converge.stdout"
+      retries: 15
+      delay: 2
+      changed_when: false
+      when: cluster_create is defined and cluster_create is changed
+
     - name: Confirm cluster state
       command: "{{ redis_cli }} -p {{ redis_port }} cluster info"
       register: final_cluster_info
