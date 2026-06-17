@@ -58,6 +58,15 @@ Run a comprehensive post-upgrade check spanning data integrity, version consiste
 
 *(You can also use `./redis-tool data verify --keys 1000` just to check the data).*
 
+### 7. Rollback (Stretch Goal S3)
+If you need to safely downgrade the cluster back to the original version, use the rollback command. 
+
+*(Note: Redis only supports rollbacks between patch versions, e.g., 7.0.15 -> 7.0.14. Downgrading minor/major versions will fail because older binaries cannot read newer RDB/AOF data formats).*
+
+```bash
+./redis-tool rollback --target-version 7.2.6
+```
+
 ---
 
 ##  Rolling Upgrade Strategy
