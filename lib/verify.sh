@@ -93,28 +93,25 @@ cmd_verify_full() {
     # -------------------------------------------------------
     echo "[2/5] Version Consistency"
 
-    declare -A version_map=()
+    local expected_version=""
+    local version_fail=0
 
     for ip in "${ALL_IPS[@]}"; do
         if ! node_ssh "$ip" "true" >/dev/null 2>&1; then
-
             echo "  FAIL - $ip unreachable"
-
             overall_fail=1
-
+            version_fail=1
             continue
         fi
-        version_map["$ip"]="$(get_redis_version "$ip")"
-    done
 
-    expected_version="${version_map[${ALL_IPS[0]}]}"
+        local current_version="$(get_redis_version "$ip")"
+        if [ -z "$expected_version" ]; then
+            expected_version="$current_version"
+        fi
 
-    version_fail=0
-
-    for ip in "${ALL_IPS[@]}"; do
-        if [ "${version_map[$ip]}" != "$expected_version" ]; then
+        if [ "$current_version" != "$expected_version" ]; then
             version_fail=1
-            echo "  MISMATCH: $ip -> ${version_map[$ip]}"
+            echo "  MISMATCH: $ip -> $current_version (expected $expected_version)"
         fi
     done
 
