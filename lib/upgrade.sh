@@ -248,6 +248,24 @@ cmd_upgrade() {
             echo "FAILED: could not find replica for master $ip"
             exit 1
         fi
+
+        echo "  Waiting for replica $replica_ip to fully sync with master before failover..."
+        local synced=0
+        for attempt in $(seq 1 30); do
+            local link_status
+            link_status=$(node_ssh "${replica_ip}" "redis-cli -p ${REDIS_PORT} info replication" 2>/dev/null | grep "master_link_status" | cut -d: -f2 | tr -d '\r\n')
+            if [ "$link_status" = "up" ]; then
+                synced=1
+                break
+            fi
+            sleep 2
+        done
+
+        if [ "$synced" -ne 1 ]; then
+            echo "FAILED: replica $replica_ip did not sync with master $ip in time"
+            exit 1
+        fi
+
         echo "  Replica for $ip is $replica_ip — triggering CLUSTER FAILOVER on it"
 
         # Trigger failover on the replica - it becomes the new master
