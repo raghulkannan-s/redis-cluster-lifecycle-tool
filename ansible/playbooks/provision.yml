@@ -29,14 +29,60 @@
       set_fact:
         replica_endpoints: "{{ groups['replicas'] | map('extract', hostvars, ['container_ip']) | map('regex_replace', '^(.*)$', '\\1:' ~ (redis_port | string)) | list }}"
 
-    - name: Create the cluster (masters + replicas, replication factor 1)
-      command: >
-        {{ redis_cli }} --cluster create
-        {{ (master_endpoints + replica_endpoints) | join(' ') }}
-        --cluster-replicas 1
-        --cluster-yes
-      register: cluster_create
-      when: cluster_nodes_check.stdout_lines | length < 2
+    - name: Cluster Creation Block
+      block:
+        - name: Create the cluster (masters + replicas, replication factor 1)
+          command: >
+            {{ redis_cli }} --cluster create
+            {{ (master_endpoints + replica_endpoints) | join(' ') }}
+            --cluster-replicas 1
+            --cluster-yes
+          register: cluster_create
+          when: cluster_nodes_check.stdout_lines | length < 2
+      rescue:
+        - name: Diagnostics - Fetch Redis logs
+          command: cat /var/log/redis/redis-server.log
+          register: redis_logs
+          changed_when: false
+          ignore_errors: true
+
+        - name: Diagnostics - Print Redis logs
+          debug:
+            var: redis_logs.stdout_lines
+
+        - name: Diagnostics - Check network interfaces
+          command: ip addr
+          register: ip_addr
+          changed_when: false
+          ignore_errors: true
+
+        - name: Diagnostics - Print network interfaces
+          debug:
+            var: ip_addr.stdout_lines
+
+        - name: Diagnostics - Check routing table
+          command: ip route
+          register: ip_route
+          changed_when: false
+          ignore_errors: true
+
+        - name: Diagnostics - Print routing table
+          debug:
+            var: ip_route.stdout_lines
+
+        - name: Diagnostics - Ping 10.10.0.11
+          command: ping -c 3 10.10.0.11
+          register: ping_test
+          changed_when: false
+          ignore_errors: true
+
+        - name: Diagnostics - Print ping result
+          debug:
+            var: ping_test.stdout_lines
+
+        - name: Fail playbook
+          fail:
+            msg: "Cluster creation failed. Dumped diagnostics above. Likely a WSL/VPN host routing conflict for 10.10.0.x."
 
     - name: Show cluster creation output
       debug:
