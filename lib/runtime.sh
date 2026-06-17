@@ -182,7 +182,7 @@ start_infra() {
         echo "Starting infrastructure..."
 
         # Pre-create the network so we can patch the CNI config version before containers start
-        podman network create infra_redis-net --subnet 10.10.0.0/24 >/dev/null 2>&1 || true
+        podman network create infra_redis-net --subnet 172.25.0.0/24 >/dev/null 2>&1 || true
         # Patch the CNI config to avoid firewall plugin version incompatibility
         for cni_conf in ~/.config/cni/net.d/*infra_redis-net.conflist /etc/cni/net.d/*infra_redis-net.conflist; do
             if [ -f "$cni_conf" ]; then
@@ -194,7 +194,7 @@ start_infra() {
             echo "Retrying after cleanup..."
             podman-compose down >/dev/null 2>&1 || true
             podman network prune -f >/dev/null 2>&1 || true
-            podman network create infra_redis-net --subnet 10.10.0.0/24 >/dev/null 2>&1 || true
+            podman network create infra_redis-net --subnet 172.25.0.0/24 >/dev/null 2>&1 || true
             for cni_conf in ~/.config/cni/net.d/*infra_redis-net.conflist /etc/cni/net.d/*infra_redis-net.conflist; do
                 if [ -f "$cni_conf" ]; then
                     sed -i 's/"cniVersion": "1.0.0"/"cniVersion": "0.4.0"/g' "$cni_conf"
