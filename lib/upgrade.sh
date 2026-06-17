@@ -211,7 +211,7 @@ cmd_upgrade() {
 
     for ip in $current_replica_ips; do
         progress=$((progress+1))
-        local name="${NODE_NAME[$ip]}"
+        local name=$(get_node_name "$ip")
         echo ""
         echo "--- Upgrading replica $ip ($name) ---"
 
@@ -235,7 +235,7 @@ cmd_upgrade() {
     echo "===================================="
     for ip in $current_master_ips; do
         progress=$((progress+1))
-        local name="${NODE_NAME[$ip]}"
+        local name=$(get_node_name "$ip")
         echo ""
         echo "--- Upgrading master $ip ($name) ---"
 

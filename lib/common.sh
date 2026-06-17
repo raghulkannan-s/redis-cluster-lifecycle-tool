@@ -9,22 +9,24 @@ version_ge() {
 node_ssh() {
     local ip="$1"
     shift
+    local port=$(get_ssh_port "$ip")
     ssh -n -i "$REDIS_CLI_KEY" \
         -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null \
         -o ConnectTimeout=5 \
-        -p "${NODE_SSH_PORT[$ip]}" \
+        -p "$port" \
         "root@${SSH_HOST}" "$@" 2>/dev/null
 }
 
 node_ssh_stdin() {
     local ip="$1"
     shift
+    local port=$(get_ssh_port "$ip")
     ssh -i "$REDIS_CLI_KEY" \
         -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null \
         -o ConnectTimeout=5 \
-        -p "${NODE_SSH_PORT[$ip]}" \
+        -p "$port" \
         "root@${SSH_HOST}" "$@" 2>/dev/null
 }
 

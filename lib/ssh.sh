@@ -5,7 +5,7 @@ wait_for_ssh() {
     echo "Waiting for SSH to become available on all nodes..."
 
     for ip in "${ALL_IPS[@]}"; do
-        local port="${NODE_SSH_PORT[$ip]}"
+        local port=$(get_ssh_port "$ip")
         local n=0
         while [ "$n" -lt "$retries" ]; do
             if ssh -n -i "$REDIS_CLI_KEY" \
@@ -22,7 +22,8 @@ wait_for_ssh() {
         done
 
         if [ "$n" -ge "$retries" ]; then
-            echo "ERROR: SSH not available on ${NODE_NAME[$ip]} (port $port) after $((retries * delay))s"
+            local name=$(get_node_name "$ip")
+            echo "ERROR: SSH not available on $name (port $port) after $((retries * delay))s"
             return 1
         fi
     done

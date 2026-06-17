@@ -32,7 +32,9 @@ print_infra_summary() {
     echo ""
     echo "Nodes (SSH via port-forward):"
     for ip in "${ALL_IPS[@]}"; do
-        echo "  ${NODE_NAME[$ip]}  container=${ip}  ssh=${SSH_HOST}:${NODE_SSH_PORT[$ip]}"
+        local name=$(get_node_name "$ip")
+        local port=$(get_ssh_port "$ip")
+        echo "  $name  container=${ip}  ssh=${SSH_HOST}:$port"
     done
     echo ""
     echo "Next step:"
