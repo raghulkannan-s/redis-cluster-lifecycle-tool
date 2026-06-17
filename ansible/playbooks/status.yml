@@ -1,0 +1,28 @@
+---
+# Optional playbook wrapper; primary status output is produced by redis-tool status.
+- name: Collect Redis cluster status from all nodes
+  hosts: redis_cluster
+  gather_facts: false
+
+  tasks:
+    - name: Get cluster info from first master
+      command: /usr/local/bin/redis-cli -p 6379 cluster info
+      register: cluster_info
+      changed_when: false
+      when: inventory_hostname == 'redis-node-1'
+
+    - name: Get node cluster role
+      command: /usr/local/bin/redis-cli -p 6379 cluster nodes
+      register: cluster_nodes
+      changed_when: false
+      when: inventory_hostname == 'redis-node-1'
+
+    - name: Get Redis version
+      command: /usr/local/bin/redis-cli -p 6379 info server
+      register: version_info
+      changed_when: false
+
+    - name: Get memory usage
+      command: /usr/local/bin/redis-cli -p 6379 info memory
+      register: memory_info
+      changed_when: false

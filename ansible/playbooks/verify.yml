@@ -6,16 +6,16 @@
   tasks:
 
     - name: Get Redis version
-      command: redis-cli info server
+      command: /usr/local/bin/redis-cli -p 6379 info server
       register: version_info
       changed_when: false
 
     - name: Get replication info
-      command: redis-cli info replication
+      command: /usr/local/bin/redis-cli -p 6379 info replication
       register: replication_info
       changed_when: false
 
     - name: Get cluster info
-      command: redis-cli cluster info
+      command: /usr/local/bin/redis-cli -p 6379 cluster info
       register: cluster_info
       changed_when: false

@@ -1,145 +1,94 @@
-# Redis Cluster Lifecycle Tool
+# Redis Cluster Lifecycle Tool (Zero-Downtime Upgrades)
 
-A CLI tool built with Bash and Ansible to provision, manage, verify, and perform zero-downtime rolling upgrades of a Redis Cluster.
+A command-line automation tool (`redis-tool`) that completely automates the lifecycle of a 6-node Redis Cluster using Ansible. The tool runs from your local host machine and orchestrates Docker/Podman containers simulating real Linux servers with SSH access.
 
-## Overview
+## Features
+- **Automated Infrastructure**: Instantly spin up a realistic 6-node SSH environment using Docker or Podman.
+- **Automated Provisioning**: Deploy and configure a fully operational Redis cluster (3 masters, 3 replicas) using Ansible playbooks.
+- **Zero-Downtime Upgrades**: Execute rolling upgrades across the cluster dynamically (replicas first, then master failovers) without losing availability or data integrity.
+- **Data Integrity Validation**: Built-in seeded data generation and verification to mathematically prove zero data loss.
+- **Structured Logging**: Automatic operation logging to `logs/operations.log`.
 
-The project manages a 6-node Redis Cluster:
+---
 
-* 3 Master nodes
-* 3 Replica nodes
-* SSH-based management through Ansible
-* Containerized infrastructure using Podman or Docker
+## Getting Started
 
-The host machine acts as the Ansible control node and all cluster operations are executed through the `redis-tool` CLI.
-
-## Infrastructure Setup
-
-Start the infrastructure:
-
-```bash
-cd infra
-
-# Docker
-docker compose up -d
-```
-
-Verify the containers are running:
-
+### 1. Bring Up the Infrastructure
+You must start the container infrastructure first before running any Ansible operations. The tool automatically detects whether you have **Docker** or **Podman** installed. (It prefers Docker by default if both are present).
 
 ```bash
-docker ps
+./redis-tool setup
 ```
+This spins up 6 Ubuntu 22.04 containers configured with SSH, representing `redis-node-1` through `redis-node-6`.
 
-## Commands
-
-### Provision Redis Cluster
-
+If you need to tear down the existing infrastructure and rebuild it from scratch:
 ```bash
-./redis-tool provision --version 7.0.15
+./redis-tool setup --force
 ```
 
-Installs Redis, configures cluster mode, starts Redis on all nodes, and forms a 3-master / 3-replica cluster.
+### 2. Provision the Cluster
+Install Redis and form the initial 6-node cluster (3 masters, 3 replicas). The playbook builds Redis, deploys configurations, starts the daemonized processes, and links the nodes.
+```bash
+./redis-tool provision --version 7.0.15 --masters 3 --replicas-per-master 1
+```
 
-### Seed Test Data
-
+### 3. Seed Data
+Generate and insert deterministic data into the cluster. This tests hash slot routing and sets a baseline for data integrity validation.
 ```bash
 ./redis-tool data seed --keys 1000
 ```
 
-Generates 1000 deterministic key-value pairs and inserts them into the cluster.
-
-### Verify Data Integrity
-
-```bash
-./redis-tool data verify
-```
-
-Reads all keys back and verifies their values.
-
-### View Cluster Status
-
+### 4. Check Status
+Verify the current cluster topology, node roles, active slots, and replication health.
 ```bash
 ./redis-tool status
 ```
 
-Displays:
-
-* Cluster state
-* Node roles
-* Redis versions
-* Slot allocation
-* Key counts
-* Memory usage
-* Replication relationships
-
-### Rolling Upgrade
-
+### 5. Perform the Rolling Upgrade
+Upgrade the entire cluster to a target version without dropping any keys.
 ```bash
 ./redis-tool upgrade --target-version 7.2.6 --strategy rolling
 ```
 
-Performs a zero-downtime rolling upgrade.
-
-Upgrade process:
-
-1. Run pre-flight checks
-2. Upgrade replicas one at a time
-3. Fail over each master to its upgraded replica
-4. Upgrade the old master
-5. Verify cluster health after every step
-6. Run post-upgrade validation
-
-### Full Verification
-
+### 6. Verify Full Health
+Run a comprehensive post-upgrade check spanning data integrity, version consistency, topology mapping, and replication status.
 ```bash
 ./redis-tool verify --full
 ```
 
-Checks:
+*(You can also use `./redis-tool data verify --keys 1000` just to check the data).*
 
-* Data integrity
-* Version consistency
-* Cluster topology
-* Cluster state
-* Replication health
+---
 
-## Idempotency
+##  Rolling Upgrade Strategy
 
-* Running `provision` on an already healthy cluster does not recreate it.
-* Running `upgrade` when all nodes are already on the target version exits cleanly.
+The script implements a **replica-first, controlled failover** rolling upgrade strategy to guarantee zero downtime and zero data loss.
 
-## Assumptions
+1. **Pre-flight Checks**: Verify cluster is healthy (`cluster_state:ok`) and all nodes are reachable before starting. Verify data integrity against the seeded baseline.
+2. **Upgrade Replicas First**:
+   - For every replica node, gracefully stop Redis, overwrite the binaries with the target version, and restart.
+   - Wait for the replica to fully sync with its master and for the cluster state to return to `ok` before proceeding to the next replica.
+3. **Upgrade Masters (Failover)**:
+   - For each master node, dynamically identify its corresponding upgraded replica.
+   - Execute a manual `CLUSTER FAILOVER` on the replica to safely promote it to the new master without dropping client connections.
+   - Wait for the cluster to acknowledge the role swap (the old master becomes a replica).
+   - Upgrade the demoted master (now a replica) just like step 2.
+4. **Post-Upgrade Validation**: 
+   - Ensure the cluster is back to 100% health, all nodes are running the target version, and all initial data is fully retrievable.
 
-* Fixed 6-node topology
-* 3 masters and 3 replicas
-* One replica per master
-* Static container IP addresses
-* SSH key authentication
-* 
+**Why this strategy?**
+Upgrading replicas first ensures that when we failover the master, the new master is already running the target code, preventing version mismatches where a newer version replicates to an older version. It keeps the cluster highly available at all times.
+
+---
+
+## Assumptions & Trade-offs
+
+- **Binary Injection**: Because corporate firewalls often block `apt-get` inside ephemeral containers, the Ansible playbooks extract pre-compiled Redis binaries directly from official Docker Hub images rather than building from source via `make`. This saves time and avoids compilation hurdles.
+- **Fixed Topology**: The scripts currently assume exactly 6 nodes (3 masters + 3 replicas). Advanced scaling operations (`--add-nodes`) are not yet implemented.
+- **Root Usage**: The containers are run with a `root` user configuration to simplify SSH and package installation for testing purposes.
+- **Idempotency**: Ansible provisioning handles idempotency gracefully, but the script optimizes by immediately skipping `provision` entirely if it detects the cluster is already healthy (`cluster_state:ok`).
+
 ## Known Limitations
 
-* No scale-out support
-* No scale-in support
-* Rollback support is experimental and not fully validated across Redis versions
-  
-## Output Files
-
-Generate submission artifacts:
-
-```bash
-mkdir -p output
-
-./redis-tool provision > output/provision_output.txt
-./redis-tool data seed --keys 1000 > output/data_seed_output.txt
-./redis-tool status > output/status_output.txt
-./redis-tool upgrade --target-version 7.2.6 --strategy rolling > output/upgrade_output.txt
-./redis-tool verify --full > output/verify_output.txt
-```
-
-Additional Features
-
-- Idempotent provisioning
-- Idempotent upgrades
-- Structured operation logging
-- Full cluster verification
+- **Podman Networking**: In certain WSL environments, Podman's rootless networking stack may exhibit IPv6/DNS routing blackholes when trying to update Ubuntu packages. If you encounter hangs, the tool automatically falls back to Docker Engine if installed.
+- **Log Archiving**: Logs are appended to `logs/operations.log`. There is no log rotation currently implemented for long-lived environments.

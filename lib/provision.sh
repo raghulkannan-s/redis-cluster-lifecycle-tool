@@ -19,26 +19,25 @@ cmd_provision() {
         echo ""
     fi
 
+    require_infra_running
+
     echo "Provisioning Redis $version on 6-node cluster..."
     log INFO "Provision started version=$version"
     echo ""
 
-    # Idempotency check: if cluster is already healthy, skip re-provisioning
+    # Idempotency: Let Ansible run to ensure configs are updated (no-op if unchanged)
     local existing_state
-    start_infra_if_needed
-    existing_state=$(ssh -i "$REDIS_CLI_KEY" -o StrictHostKeyChecking=accept-new \
-        "root@${NODE1_IP}" "redis-cli -p ${REDIS_PORT} cluster info 2>/dev/null" 2>/dev/null \
-        | awk -F: '/cluster_state/ {print $2}' | tr -d '\r')
+    existing_state=$(node_ssh "${NODE1_IP}" \
+        "redis-cli -p ${REDIS_PORT} cluster info 2>/dev/null" 2>/dev/null \
+        | awk -F: '/cluster_state/ {print $2}' | tr -d '\r' || true)
 
     if [ "$existing_state" = "ok" ]; then
-        echo "Cluster already provisioned and healthy (cluster_state:ok)."
-        echo "Skipping re-provisioning. Showing current topology:"
-        print_topology
-        log INFO "Provision skipped - cluster already healthy"
-        return 0
+        echo "Cluster already provisioned. Updating configs idempotently..."
     fi
 
-    ansible-playbook "$ANSIBLE_DIR/playbooks/provision.yml" -e "redis_version=$version"
+    ensure_redis_binaries "$version"
+
+    ANSIBLE_CONFIG="$ANSIBLE_DIR/ansible.cfg" ansible-playbook "$ANSIBLE_DIR/playbooks/provision.yml" -e "redis_version=$version"
     log INFO "Provision completed successfully"
 
     print_topology

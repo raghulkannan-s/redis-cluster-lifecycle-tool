@@ -15,18 +15,19 @@
     redis_port: 6379
   tasks:
 
-    - name: Check whether cluster is already formed
-      command: "{{ redis_cli }} -p {{ redis_port }} cluster info"
-      register: cluster_info_check
+    - name: Check cluster nodes
+      command: "{{ redis_cli }} -p {{ redis_port }} cluster nodes"
+      register: cluster_nodes_check
+      failed_when: false
       changed_when: false
 
-    - name: Build list of master node IPs:port
+    - name: Build list of master node container IPs:port
       set_fact:
-        master_endpoints: "{{ groups['masters'] | map('extract', hostvars, ['ansible_host']) | map('regex_replace', '^(.*)$', '\\1:' ~ redis_port) | list }}"
+        master_endpoints: "{{ groups['masters'] | map('extract', hostvars, ['container_ip']) | map('regex_replace', '^(.*)$', '\\1:' ~ (redis_port | string)) | list }}"
 
-    - name: Build list of replica node IPs:port
+    - name: Build list of replica node container IPs:port
       set_fact:
-        replica_endpoints: "{{ groups['replicas'] | map('extract', hostvars, ['ansible_host']) | map('regex_replace', '^(.*)$', '\\1:' ~ redis_port) | list }}"
+        replica_endpoints: "{{ groups['replicas'] | map('extract', hostvars, ['container_ip']) | map('regex_replace', '^(.*)$', '\\1:' ~ (redis_port | string)) | list }}"
 
     - name: Create the cluster (masters + replicas, replication factor 1)
       command: >
@@ -35,7 +36,7 @@
         --cluster-replicas 1
         --cluster-yes
       register: cluster_create
-      when: "'cluster_state:ok' not in cluster_info_check.stdout"
+      when: cluster_nodes_check.stdout_lines | length < 2
 
     - name: Show cluster creation output
       debug:

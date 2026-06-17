@@ -1,21 +1,39 @@
+find_alive_node() {
+
+    for ip in "${ALL_IPS[@]}"; do
+
+        if node_ssh "$ip" "redis-cli -p ${REDIS_PORT} ping" 2>/dev/null | grep -q PONG; then
+            echo "$ip"
+            return 0
+        fi
+
+    done
+
+    return 1
+}
 
 get_cluster_state() {
     local ip="${1:-$NODE1_IP}"
-    ssh -n -i "$REDIS_CLI_KEY" -o StrictHostKeyChecking=accept-new \
-        "root@${ip}" "redis-cli -p ${REDIS_PORT} cluster info 2>/dev/null" 2>/dev/null \
-        | awk -F: '/cluster_state/ {print $2}' | tr -d '\r'
+    node_ssh "${ip}" "redis-cli -p ${REDIS_PORT} cluster info" 2>/dev/null \
+        | awk -F: '/cluster_state/ {print $2}' | tr -d '\r' || true
 }
 
 get_redis_version() {
     local ip="$1"
-    ssh -n -i "$REDIS_CLI_KEY" -o StrictHostKeyChecking=accept-new \
-        "root@${ip}" "redis-cli -p ${REDIS_PORT} info server 2>/dev/null" 2>/dev/null \
-        | awk -F: '/redis_version/ {print $2}' | tr -d '\r'
+    node_ssh "${ip}" "redis-cli -p ${REDIS_PORT} info server" 2>/dev/null \
+        | awk -F: '/redis_version/ {print $2}' | tr -d '\r' || true
 }
 
 get_cluster_nodes() {
-    ssh -n -i "$REDIS_CLI_KEY" -o StrictHostKeyChecking=accept-new \
-        "root@${NODE1_IP}" "redis-cli -p ${REDIS_PORT} cluster nodes" 2>/dev/null
+
+    local alive
+
+    alive=$(find_alive_node) || return 1
+
+    node_ssh "$alive" \
+        "redis-cli -p ${REDIS_PORT} cluster nodes" \
+        2>/dev/null || true
+
 }
 
 get_node_id() {
@@ -53,9 +71,14 @@ print_topology() {
     echo "===================================="
 
     local cluster_info
-    cluster_info=$(ssh -i "$REDIS_CLI_KEY" \
-        -o StrictHostKeyChecking=accept-new \
-        "root@${NODE1_IP}" \
+    local alive
+
+        alive=$(find_alive_node) || {
+            echo "No reachable Redis node found"
+            return 1
+        }
+
+        cluster_info=$(node_ssh "$alive" \
         "redis-cli -p ${REDIS_PORT} cluster info" 2>/dev/null)
 
     local state
@@ -65,9 +88,7 @@ print_topology() {
     echo ""
 
     local nodes
-    nodes=$(ssh -i "$REDIS_CLI_KEY" \
-        -o StrictHostKeyChecking=accept-new \
-        "root@${NODE1_IP}" \
+    nodes=$(node_ssh "$alive" \
         "redis-cli -p ${REDIS_PORT} cluster nodes" 2>/dev/null)
 
     echo "MASTERS"
@@ -82,15 +103,10 @@ print_topology() {
             }
         ' | xargs)
 
-        ver=$(ssh -n -i "$REDIS_CLI_KEY" \
-            -o StrictHostKeyChecking=accept-new \
-            "root@$(echo "$ip_port" | cut -d: -f1)" \
-            "redis-cli -p ${REDIS_PORT} info server" 2>/dev/null |
-            awk -F: '/redis_version/ {print $2}' |
-            tr -d '\r')
+        ver=$(get_redis_version "$(echo "$ip_port" | cut -d: -f1)")
 
         echo "  $ip_port [master] v$ver slots: $slots"
-    done < <(echo "$nodes" | grep -E 'master')
+    done < <(echo "$nodes" | awk '$3 ~ /master/')
 
     echo ""
     echo "REPLICAS"
@@ -104,16 +120,17 @@ print_topology() {
             awk -v id="$master_id" '$1 == id {print $2}' |
             cut -d@ -f1)
 
-        ver=$(ssh -n -i "$REDIS_CLI_KEY" \
-            -o StrictHostKeyChecking=accept-new \
-            "root@$(echo "$ip_port" | cut -d: -f1)" \
-            "redis-cli -p ${REDIS_PORT} info server" 2>/dev/null |
-            awk -F: '/redis_version/ {print $2}' |
-            tr -d '\r')
+        ver=$(get_redis_version "$(echo "$ip_port" | cut -d: -f1)")
 
         echo "  $ip_port [replica] v$ver replicating: $master_ip"
-    done < <(echo "$nodes" | grep -E 'slave')
+    done < <(echo "$nodes" | awk '$3 ~ /slave|replica/')
 
     echo ""
 }
 
+get_cluster_versions() {
+
+    for ip in "${ALL_IPS[@]}"; do
+        get_redis_version "$ip"
+    done
+}

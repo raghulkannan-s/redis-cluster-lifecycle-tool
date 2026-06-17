@@ -1,7 +1,9 @@
 cmd_status() {
+    require_infra_running
+    log INFO "Status check started"
+
     local cluster_info
-    cluster_info=$(ssh -n -i "$REDIS_CLI_KEY" -o StrictHostKeyChecking=accept-new \
-        "root@${NODE1_IP}" "redis-cli -p ${REDIS_PORT} cluster info" 2>/dev/null)
+    cluster_info=$(node_ssh "${NODE1_IP}" "redis-cli -p ${REDIS_PORT} cluster info" 2>/dev/null)
 
     local state
     state=$(echo "$cluster_info" | awk -F: '/cluster_state/ {print $2}' | tr -d '\r')
@@ -10,8 +12,7 @@ cmd_status() {
     echo ""
 
     local nodes
-    nodes=$(ssh -n -i "$REDIS_CLI_KEY" -o StrictHostKeyChecking=accept-new \
-        "root@${NODE1_IP}" "redis-cli -p ${REDIS_PORT} cluster nodes" 2>/dev/null)
+    nodes=$(node_ssh "${NODE1_IP}" "redis-cli -p ${REDIS_PORT} cluster nodes" 2>/dev/null)
 
     echo "MASTERS"
     while read -r line; do
@@ -20,19 +21,15 @@ cmd_status() {
 
         slots=$(echo "$line" | awk '{ for(i=9;i<=NF;i++) printf "%s ", $i }' | xargs)
 
-        ver=$(ssh -n -i "$REDIS_CLI_KEY" -o StrictHostKeyChecking=accept-new \
-            "root@${ip}" "redis-cli -p ${REDIS_PORT} info server" 2>/dev/null \
-            | awk -F: '/redis_version/ {print $2}' | tr -d '\r')
+        ver=$(get_redis_version "$ip")
 
-        keycount=$(ssh -n -i "$REDIS_CLI_KEY" -o StrictHostKeyChecking=accept-new \
-            "root@${ip}" "redis-cli -p ${REDIS_PORT} DBSIZE" 2>/dev/null | tr -d '\r')
+        keycount=$(node_ssh "${ip}" "redis-cli -p ${REDIS_PORT} DBSIZE" 2>/dev/null | tr -d '\r')
 
-        mem=$(ssh -n -i "$REDIS_CLI_KEY" -o StrictHostKeyChecking=accept-new \
-            "root@${ip}" "redis-cli -p ${REDIS_PORT} info memory" 2>/dev/null \
+        mem=$(node_ssh "${ip}" "redis-cli -p ${REDIS_PORT} info memory" 2>/dev/null \
             | awk -F: '/used_memory_human/ {print $2}' | tr -d '\r')
 
         echo "  $ip_port [master] v$ver slots: $slots keys: $keycount mem: $mem"
-    done < <(echo "$nodes" | grep -E 'master')
+    done < <(echo "$nodes" | awk '$3 ~ /master/')
 
     echo ""
     echo "REPLICAS"
@@ -43,22 +40,29 @@ cmd_status() {
 
         master_ip=$(echo "$nodes" | awk -v id="$master_id" '$1 == id {print $2}' | cut -d@ -f1)
 
-        ver=$(ssh -n -i "$REDIS_CLI_KEY" -o StrictHostKeyChecking=accept-new \
-            "root@${ip}" "redis-cli -p ${REDIS_PORT} info server" 2>/dev/null \
-            | awk -F: '/redis_version/ {print $2}' | tr -d '\r')
+        ver=$(get_redis_version "$ip")
 
-        mem=$(ssh -n -i "$REDIS_CLI_KEY" -o StrictHostKeyChecking=accept-new \
-            "root@${ip}" "redis-cli -p ${REDIS_PORT} info memory" 2>/dev/null \
+        mem=$(node_ssh "${ip}" "redis-cli -p ${REDIS_PORT} info memory" 2>/dev/null \
             | awk -F: '/used_memory_human/ {print $2}' | tr -d '\r')
 
         echo "  $ip_port [replica] v$ver replicating: $master_ip mem: $mem"
-    done < <(echo "$nodes" | grep -E 'slave')
+    done < <(echo "$nodes" | awk '$3 ~ /slave|replica/')
 
     echo ""
+    log INFO "Status check completed"
 }
 
 
 cmd_verify_full() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --full) shift ;;
+            *) echo "Unknown option: $1"; exit 1 ;;
+        esac
+    done
+
+    require_infra_running
+
     log INFO "Full verification started"
     echo "===================================="
     echo " FULL CLUSTER VERIFICATION"
@@ -73,7 +77,7 @@ cmd_verify_full() {
     echo "[1/5] Data Integrity"
 
     local verify_output
-    verify_output=$(cmd_data_verify --keys 1000)
+    verify_output=$(cmd_data_verify --keys 1000 2>&1) || true
 
     if echo "$verify_output" | grep -q "PASS"; then
         echo "  PASS"
@@ -92,6 +96,14 @@ cmd_verify_full() {
     declare -A version_map=()
 
     for ip in "${ALL_IPS[@]}"; do
+        if ! node_ssh "$ip" "true" >/dev/null 2>&1; then
+
+            echo "  FAIL - $ip unreachable"
+
+            overall_fail=1
+
+            continue
+        fi
         version_map["$ip"]="$(get_redis_version "$ip")"
     done
 
@@ -122,9 +134,7 @@ cmd_verify_full() {
 
     topology_fail=0
 
-    cluster_info=$(ssh -n -i "$REDIS_CLI_KEY" \
-        -o StrictHostKeyChecking=accept-new \
-        "root@${NODE1_IP}" \
+    cluster_info=$(node_ssh "${NODE1_IP}" \
         "redis-cli -p ${REDIS_PORT} cluster info" 2>/dev/null)
 
     slots_assigned=$(echo "$cluster_info" |
@@ -199,18 +209,14 @@ cmd_verify_full() {
 
     for ip in "${ALL_IPS[@]}"; do
 
-        role=$(ssh -n -i "$REDIS_CLI_KEY" \
-            -o StrictHostKeyChecking=accept-new \
-            "root@${ip}" \
+        role=$(node_ssh "${ip}" \
             "redis-cli -p ${REDIS_PORT} info replication" 2>/dev/null |
-            awk -F: '/role/ {print $2}' |
+            awk -F: '/^role/ {print $2}' |
             tr -d '\r')
 
         if [[ "$role" == "slave" || "$role" == "replica" ]]; then
 
-            link_status=$(ssh -n -i "$REDIS_CLI_KEY" \
-                -o StrictHostKeyChecking=accept-new \
-                "root@${ip}" \
+            link_status=$(node_ssh "${ip}" \
                 "redis-cli -p ${REDIS_PORT} info replication" 2>/dev/null |
                 awk -F: '/master_link_status/ {print $2}' |
                 tr -d '\r')

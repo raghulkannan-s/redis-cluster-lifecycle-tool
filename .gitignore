@@ -11,7 +11,8 @@ ansible/.vault_pass
 # Logs
 logs/
 *.log
-output/
+output/*
+binaries/
 
 # Python
 __pycache__/

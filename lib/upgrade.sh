@@ -1,3 +1,10 @@
+version_lt() {
+    [ "$(printf '%s\n' "$1" "$2" | sort -V | head -n1)" != "$2" ]
+}
+
+version_gt() {
+    [ "$(printf '%s\n' "$1" "$2" | sort -V | tail -n1)" != "$2" ]
+}
 
 validate_version() {
 
@@ -16,6 +23,7 @@ validate_version() {
 validate_upgrade_request() {
 
     local target_version="$1"
+    local allow_downgrade="${2:-false}"
 
     validate_version "$target_version" || return 1
 
@@ -30,18 +38,18 @@ validate_upgrade_request() {
 
         [ -z "$current_version" ] && continue
 
-        if version_lt "$target_version" "$current_version"; then
+        if [ "$allow_downgrade" != "true" ] && version_lt "$target_version" "$current_version"; then
 
             echo
             echo "ERROR: Downgrade detected"
             echo "Current version : $current_version"
             echo "Target version  : $target_version"
             echo
-            echo "Downgrades are not supported."
+            echo "Downgrades are not supported. Use rollback command instead."
             return 1
         fi
 
-        if version_gt "$target_version" "$current_version"; then
+        if [ "$current_version" != "$target_version" ]; then
             needs_upgrade=1
         fi
 
@@ -75,53 +83,14 @@ validate_download_url() {
 }
 
 
-check_prereqs() {
-    local missing=0
-
-    if command -v podman >/dev/null 2>&1; then
-        RUNTIME="podman"
-        VER=$(podman --version | awk '{print $3}')
-        echo "✓ Podman $VER found"
-
-    elif command -v docker >/dev/null 2>&1; then
-
-        if docker compose version >/dev/null 2>&1; then
-            RUNTIME="docker"
-            VER=$(docker --version | awk '{print $3}' | tr -d ',')
-            echo "✓ Docker $VER found"
-        else
-            echo "✗ Docker Compose plugin not found"
-            missing=1
-        fi
-
-    else
-        echo "✗ Container runtime not found"
-        missing=1
-    fi
-
-    if command -v ansible-playbook >/dev/null 2>&1; then
-        AV=$(ansible-playbook --version | head -1 | grep -oP '\d+\.\d+\.\d+')
-        echo "✓ Ansible $AV found"
-    else
-        echo "✗ Ansible not found"
-        missing=1
-    fi
-
-    if [ "$missing" -eq 1 ]; then
-        exit 1
-    fi
-
-    echo "Proceeding..."
-    echo ""
-}
-
-
-
 # Run the per-node upgrade playbook against one host
 upgrade_one_node() {
     local node_name="$1"
     local target_version="$2"
-    ansible-playbook "$ANSIBLE_DIR/playbooks/upgrade_node.yml" \
+
+    ensure_redis_binaries "$target_version"
+
+    ANSIBLE_CONFIG="$ANSIBLE_DIR/ansible.cfg" ansible-playbook "$ANSIBLE_DIR/playbooks/upgrade_node.yml" \
         -e "redis_version=${target_version}" \
         --limit "${node_name}"
 }
@@ -130,20 +99,33 @@ upgrade_one_node() {
 cmd_upgrade() {
     local target_version=""
     local strategy="rolling"
+    local allow_downgrade="false"
 
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --target-version) target_version="$2"; shift 2 ;;
             --strategy) strategy="$2"; shift 2 ;;
+            --allow-downgrade) allow_downgrade="true"; shift ;;
             *) echo "Unknown option: $1"; exit 1 ;;
         esac
     done
+
+    if [ "$strategy" != "rolling" ]; then
+
+        echo "ERROR: unsupported strategy '$strategy'"
+        echo "Supported: rolling"
+
+        exit 1
+
+    fi
 
     if [ -z "$target_version" ]; then
         echo "ERROR: --target-version is required"
         exit 1
     fi
+
+    require_infra_running
 
     log INFO "Upgrade started target_version=$target_version"
 
@@ -169,12 +151,7 @@ cmd_upgrade() {
 
     for ip in "${ALL_IPS[@]}"; do
 
-        if ! ssh -n \
-            -i "$REDIS_CLI_KEY" \
-            -o StrictHostKeyChecking=accept-new \
-            -o ConnectTimeout=5 \
-            "root@${ip}" \
-            "redis-cli -p ${REDIS_PORT} ping" 2>/dev/null |
+        if ! node_ssh "$ip" "redis-cli -p ${REDIS_PORT} ping" 2>/dev/null |
             grep -q PONG; then
 
             echo "ABORT: $ip unreachable"
@@ -188,8 +165,9 @@ cmd_upgrade() {
 
     echo "[Pre-flight] Validating target version..."
 
-    validate_upgrade_request "$target_version"
-    rc=$?
+    # Capture exit code without set -e killing the script
+    rc=0
+    validate_upgrade_request "$target_version" "$allow_downgrade" || rc=$?
 
     if [ "$rc" -eq 2 ]; then
         exit 0
@@ -199,29 +177,39 @@ cmd_upgrade() {
 
     echo "[Pre-flight] Verifying Redis release exists..."
 
-    if ! curl -fsI \
-        "https://download.redis.io/releases/redis-${target_version}.tar.gz" \
-        >/dev/null 2>&1; then
-
-        echo "ERROR: Redis version '$target_version' does not exist"
-        exit 1
-    fi
+    validate_download_url "$target_version" || exit 1
 
     echo "  target version validated"
 
 
     echo "[Pre-flight] Running data verification..."
 
-    cmd_data_verify --keys 1000
+    if ! cmd_data_verify --keys 1000; then
+
+        echo "ABORT: pre-upgrade data verification failed"
+        exit 1
+
+    fi
 
     echo ""
 
     # --- 2. Upgrade replicas first ------------------------------------------
+    # Dynamically discover current replicas from cluster state
     echo "===================================="
     echo " Step 1: Upgrading replicas"
     echo "===================================="
+
+    local current_replica_ips
+    current_replica_ips=$(get_cluster_nodes | awk '$3 ~ /slave|replica/ && $3 !~ /fail/' | awk '{print $2}' | cut -d: -f1 | cut -d@ -f1)
+
+    local current_master_ips
+    current_master_ips=$(get_cluster_nodes | awk '$3 ~ /master/ && $3 !~ /fail/' | awk '{print $2}' | cut -d: -f1 | cut -d@ -f1)
+
     local progress=0
-    for ip in "${REPLICA_IPS[@]}"; do
+    local total_nodes
+    total_nodes=$(echo "$current_replica_ips" "$current_master_ips" | wc -w)
+
+    for ip in $current_replica_ips; do
         progress=$((progress+1))
         local name="${NODE_NAME[$ip]}"
         echo ""
@@ -237,7 +225,7 @@ cmd_upgrade() {
             exit 1
         fi
 
-        echo "[${progress}/6] Upgraded replica ${ip} — cluster: ok"
+        echo "[${progress}/${total_nodes}] Upgraded replica ${ip} — cluster: ok"
     done
 
     # --- 3. Upgrade masters (one at a time, with failover) -------------------
@@ -245,11 +233,13 @@ cmd_upgrade() {
     echo "===================================="
     echo " Step 2: Upgrading masters (with failover)"
     echo "===================================="
-    for ip in "${MASTER_IPS[@]}"; do
+    for ip in $current_master_ips; do
         progress=$((progress+1))
         local name="${NODE_NAME[$ip]}"
         echo ""
         echo "--- Upgrading master $ip ($name) ---"
+
+        ensure_redis_binaries "$target_version"
 
         # Find this master's replica (already upgraded in step 1)
         local replica_ip
@@ -261,8 +251,7 @@ cmd_upgrade() {
         echo "  Replica for $ip is $replica_ip — triggering CLUSTER FAILOVER on it"
 
         # Trigger failover on the replica - it becomes the new master
-        if ! ssh -n -i "$REDIS_CLI_KEY" -o StrictHostKeyChecking=accept-new \
-            "root@${replica_ip}" "redis-cli -p ${REDIS_PORT} cluster failover" 2>/dev/null; then
+        if ! node_ssh "${replica_ip}" "redis-cli -p ${REDIS_PORT} cluster failover" 2>/dev/null; then
             echo "FAILED at step: CLUSTER FAILOVER on $replica_ip (replica of master $ip)"
             exit 1
         fi
@@ -272,8 +261,7 @@ cmd_upgrade() {
         for attempt in $(seq 1 20); do
             sleep 2
             local role
-            role=$(ssh -n -i "$REDIS_CLI_KEY" -o StrictHostKeyChecking=accept-new \
-                "root@${ip}" "redis-cli -p ${REDIS_PORT} role" 2>/dev/null | head -1)
+            role=$(node_ssh "${ip}" "redis-cli -p ${REDIS_PORT} role" 2>/dev/null | head -1 | tr -d '\r')
             if [[ "$role" == "slave" || "$role" == "replica" ]]; then
                 failover_done=1
                 break
@@ -297,7 +285,7 @@ cmd_upgrade() {
             exit 1
         fi
 
-        echo "[${progress}/6] Upgraded master ${ip} (failover -> ${replica_ip}, then upgraded) — cluster: ok"
+        echo "[${progress}/${total_nodes}] Upgraded master ${ip} (failover -> ${replica_ip}, then upgraded) — cluster: ok"
     done
 
     # --- 4. Post-upgrade verification -----------------------------------------

@@ -1,15 +1,16 @@
 ---
 - name: restart redis
   shell: |
-    if {{ redis_symlink_dir }}/redis-cli -p {{ redis_port }} ping 2>/dev/null | grep -q PONG; then
-      cluster_state=$({{ redis_symlink_dir }}/redis-cli -p {{ redis_port }} cluster info | grep cluster_state | cut -d: -f2 | tr -d '\r')
-      if [ "$cluster_state" = "ok" ]; then
-        echo "Redis already running with healthy cluster state, skipping restart"
-        exit 0
-      fi
-    fi
     {{ redis_symlink_dir }}/redis-cli -p {{ redis_port }} shutdown || true
-    sleep 1
+    sleep 2
     rm -f {{ redis_pid_file }}
     {{ redis_symlink_dir }}/redis-server {{ redis_config_file }}
-  changed_when: false
+
+    for i in $(seq 1 15); do
+      if {{ redis_symlink_dir }}/redis-cli -p {{ redis_port }} ping 2>/dev/null | grep -q PONG; then
+        exit 0
+      fi
+      sleep 2
+    done
+
+    exit 1

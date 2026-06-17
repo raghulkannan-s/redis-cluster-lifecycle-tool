@@ -16,6 +16,12 @@ cluster-enabled yes
 cluster-config-file nodes-{{ redis_port }}.conf
 cluster-node-timeout {{ redis_cluster_node_timeout }}
 
+# Announce the container's internal IP so cluster nodes can find each other
+# (required in containerized environments where hostname may not resolve)
+cluster-announce-ip {{ container_ip }}
+cluster-announce-port {{ redis_port }}
+cluster-announce-bus-port {{ redis_cluster_bus_port }}
+
 maxmemory {{ redis_maxmemory }}
 maxmemory-policy allkeys-lru
 

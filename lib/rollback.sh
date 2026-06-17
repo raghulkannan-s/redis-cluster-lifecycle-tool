@@ -1,4 +1,3 @@
-
 cmd_rollback() {
 
     local target_version=""
@@ -29,9 +28,11 @@ cmd_rollback() {
 
     log INFO "Rollback started (target_version=$target_version)"
 
+    # Use --allow-downgrade flag so the upgrade logic accepts the lower version
     cmd_upgrade \
         --target-version "$target_version" \
-        --strategy rolling
+        --strategy rolling \
+        --allow-downgrade
 
     rc=$?
 

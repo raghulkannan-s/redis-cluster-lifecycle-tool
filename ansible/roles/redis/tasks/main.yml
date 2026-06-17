@@ -18,50 +18,24 @@
     path: "{{ redis_bin_dir }}/redis-server"
   register: redis_binary
 
-- name: Install build dependencies
-  apt:
-    name:
-      - build-essential
-      - tcl
-      - wget
-      - pkg-config
-      - libssl-dev
-    state: present
-    update_cache: yes
-  when: not redis_binary.stat.exists
-  register: apt_install
-  retries: 3
-  delay: 5
-  until: apt_install is succeeded
-
-- name: Download Redis {{ redis_version }} source
-  get_url:
-    url: "{{ redis_download_url }}"
-    dest: "/usr/local/src/redis-{{ redis_version }}.tar.gz"
-    timeout: 120
+- name: Create versioned bin directory
+  file:
+    path: "{{ redis_bin_dir }}"
+    state: directory
+    mode: "0755"
   when: not redis_binary.stat.exists
 
-- name: Extract Redis source
-  unarchive:
-    src: "/usr/local/src/redis-{{ redis_version }}.tar.gz"
-    dest: "/usr/local/src"
-    remote_src: yes
-    creates: "{{ redis_src_dir }}/src/redis-server"
+- name: Copy pre-compiled Redis binaries
+  copy:
+    src: "../../../binaries/{{ redis_version }}/{{ item }}"
+    dest: "{{ redis_bin_dir }}/{{ item }}"
+    mode: "0755"
+  loop:
+    - redis-server
+    - redis-cli
   when: not redis_binary.stat.exists
 
-- name: Build Redis (make)
-  command: make -j{{ ansible_processor_vcpus | default(2) }}
-  args:
-    chdir: "{{ redis_src_dir }}"
-    creates: "{{ redis_src_dir }}/src/redis-server"
-  when: not redis_binary.stat.exists
-
-- name: Install Redis binaries to versioned directory
-  command: make PREFIX={{ redis_install_dir }} install
-  args:
-    chdir: "{{ redis_src_dir }}"
-    creates: "{{ redis_bin_dir }}/redis-server"
-  when: not redis_binary.stat.exists
+# Binaries already copied above
 
 - name: Symlink redis binaries into /usr/local/bin
   file:
