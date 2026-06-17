@@ -40,7 +40,9 @@ ensure_redis_binaries() {
         # Use whatever runtime is available (detect_runtime should have populated RUNTIME)
         local rt="${RUNTIME:-docker}"
         
-        "$rt" create --name "$container_name" "redis:$version" >/dev/null
+        # Use fully qualified image name (docker.io/library/redis) to prevent 
+        # Podman short-name resolution errors on strict Linux distributions.
+        "$rt" create --name "$container_name" "docker.io/library/redis:$version" >/dev/null
         "$rt" cp "$container_name:/usr/local/bin/redis-server" "$bin_dir/"
         "$rt" cp "$container_name:/usr/local/bin/redis-cli" "$bin_dir/"
         "$rt" cp "$container_name:/usr/local/bin/redis-benchmark" "$bin_dir/"
